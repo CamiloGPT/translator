@@ -8,11 +8,7 @@ use rodio::{DeviceSinkBuilder, Player};
 use serde_json::json;
 use std::num::{NonZeroU16, NonZeroU32};
 use std::{env, sync::Arc};
-use tokio::{
-    net::TcpListener,
-    sync::mpsc,
-    time::{interval, Duration},
-};
+use tokio::{net::TcpListener, sync::mpsc};
 use tokio_tungstenite::{
     connect_async,
     tungstenite::{client::IntoClientRequest, protocol::Message},
@@ -90,29 +86,65 @@ async fn run() -> Result<()> {
     let player = Arc::new(player);
     let player_clone = player.clone();
 
-    let mut commit_interval = interval(Duration::from_millis(200));
-
-    // Writer task
+    // Writer task with basic silence detection (VAD)
     let writer = tokio::spawn(async move {
-        loop {
-            tokio::select! {
-                Some(samples) = rx.recv() => {
-                    let bytes: &[u8] = bytemuck::cast_slice(&samples);
-                    let b64 = STANDARD.encode(bytes);
+        // Load configuration from environment variables or use default values
+        let silence_threshold: i16 = env::var("SILENCE_THRESHOLD")
+            .unwrap_or_else(|_| "500".to_string())
+            .parse()
+            .unwrap_or(500); // default: 500
 
-                    let msg = json!({
-                        "type": "input_audio_buffer.append",
-                        "audio": b64
-                    });
+        let silence_frames_required: usize = env::var("SILENCE_FRAMES_REQUIRED")
+            .unwrap_or_else(|_| "8".to_string())
+            .parse()
+            .unwrap_or(8); // default: 8 frames (~400ms)
 
-                    let _ = write.send(Message::Text(msg.to_string().into())).await;
-                }
-                _ = commit_interval.tick() => {
+        println!(
+            "Voice activity detection configured: threshold={}, frames_required={}",
+            silence_threshold, silence_frames_required
+        );
+
+        let mut silence_frames = 0;
+        let mut speaking = false;
+
+        while let Some(samples) = rx.recv().await {
+            // Calculate average energy of the audio frame
+            let avg_energy: i16 =
+                samples.iter().map(|s| s.abs()).sum::<i16>() / samples.len() as i16;
+
+            let is_speaking = avg_energy > silence_threshold;
+
+            if is_speaking {
+                speaking = true;
+                silence_frames = 0;
+
+                // Send audio chunk to the WebSocket buffer
+                let bytes: &[u8] = bytemuck::cast_slice(&samples);
+                let b64 = STANDARD.encode(bytes);
+
+                let msg = json!({
+                    "type": "input_audio_buffer.append",
+                    "audio": b64
+                });
+
+                let _ = write.send(Message::Text(msg.to_string().into())).await;
+            } else if speaking {
+                silence_frames += 1;
+
+                if silence_frames >= silence_frames_required {
+                    // Commit the buffer only after prolonged silence
                     let commit_msg = json!({
                         "type": "input_audio_buffer.commit"
                     });
 
-                    let _ = write.send(Message::Text(commit_msg.to_string().into())).await;
+                    let _ = write
+                        .send(Message::Text(commit_msg.to_string().into()))
+                        .await;
+
+                    println!("Audio committed after silence");
+
+                    speaking = false;
+                    silence_frames = 0;
                 }
             }
         }
