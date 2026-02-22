@@ -1,7 +1,12 @@
 use anyhow::Result;
 use axum::{routing::post, Router};
+use base64::{engine::general_purpose::STANDARD, Engine};
+use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use futures::{SinkExt, StreamExt};
+use rodio::buffer::SamplesBuffer;
+use rodio::{DeviceSinkBuilder, Player};
 use serde_json::json;
+use std::num::{NonZeroU16, NonZeroU32};
 use std::{env, sync::Arc};
 use tokio::{
     net::TcpListener,
@@ -9,12 +14,6 @@ use tokio::{
     time::{interval, Duration},
 };
 use tokio_tungstenite::{connect_async, tungstenite::protocol::Message};
-
-use base64::{engine::general_purpose::STANDARD, Engine};
-use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
-use rodio::{OutputStreamBuilder, Sink};
-
-use std::num::{NonZeroU16, NonZeroU32};
 
 #[tokio::main]
 async fn main() {
@@ -74,12 +73,12 @@ async fn run() -> Result<()> {
 
     spawn_mic_capture(tx)?;
 
-    // Setup audio output (rodio 0.22)
-    let stream_handle = OutputStreamBuilder::open_default_stream()?;
-    let sink = Sink::connect_new(&stream_handle.mixer());
-    let sink = Arc::new(sink);
+    // Audio output setup (rodio 0.22.1)
+    let handle = DeviceSinkBuilder::open_default_sink()?;
+    let player = Player::connect_new(&handle.mixer());
+    let player = Arc::new(player);
+    let player_clone = player.clone();
 
-    let sink_clone = sink.clone();
     let mut commit_interval = interval(Duration::from_millis(200));
 
     // Writer task
@@ -121,19 +120,18 @@ async fn run() -> Result<()> {
                                     .map(|b| i16::from_le_bytes([b[0], b[1]]))
                                     .collect();
 
-                                // Convert to f32 for rodio 0.22
                                 let samples_f32: Vec<f32> = samples_i16
                                     .into_iter()
                                     .map(|s| s as f32 / i16::MAX as f32)
                                     .collect();
 
-                                let source = rodio::buffer::SamplesBuffer::new(
+                                let source = SamplesBuffer::new(
                                     NonZeroU16::new(1).unwrap(),
                                     NonZeroU32::new(24000).unwrap(),
                                     samples_f32,
                                 );
 
-                                sink_clone.append(source);
+                                player_clone.append(source);
                             }
                         }
                     }
