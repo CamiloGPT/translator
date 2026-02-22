@@ -7,6 +7,8 @@ use rodio::buffer::SamplesBuffer;
 use rodio::{DeviceSinkBuilder, Player};
 use serde_json::json;
 use std::num::{NonZeroU16, NonZeroU32};
+use std::sync::Mutex;
+use std::time::Duration;
 use std::{env, sync::Arc};
 use tokio::{net::TcpListener, sync::mpsc};
 use tokio_tungstenite::{
@@ -95,7 +97,7 @@ async fn run() -> Result<()> {
     // Writer task with basic silence detection (VAD)
     let writer = tokio::spawn(async move {
         // Load configuration from environment variables or use default values
-        let silence_threshold: i16 = env::var("SILENCE_THRESHOLD")
+        let silence_threshold: i32 = env::var("SILENCE_THRESHOLD")
             .unwrap_or_else(|_| "500".to_string())
             .parse()
             .unwrap_or(500); // default: 500
@@ -115,8 +117,9 @@ async fn run() -> Result<()> {
 
         while let Some(samples) = rx.recv().await {
             // Calculate average energy of the audio frame
-            let avg_energy: i16 =
-                samples.iter().map(|s| s.abs()).sum::<i16>() / samples.len() as i16;
+            let avg_energy: i32 =
+                samples.iter().map(|s| s.abs() as i32).sum::<i32>() / samples.len() as i32;
+            //println!("avg_energy={}", avg_energy);
 
             let is_speaking = avg_energy > silence_threshold;
 
@@ -200,50 +203,59 @@ async fn run() -> Result<()> {
 // Spawn microphone capture thread
 fn spawn_mic_capture(tx: mpsc::Sender<Vec<i16>>) -> Result<()> {
     std::thread::spawn(move || {
+        // Get the default audio host (e.g., ALSA, PulseAudio, or CoreAudio)
         let host = cpal::default_host();
+        println!("Default audio host initialized.");
 
-        // List all input devices
-        println!("Available input devices:");
-        for d in host.input_devices().expect("Failed to list input devices") {
-            println!("- {}", format!("{:?}", d.description()));
-        }
-
-        // Try to find the virtual TranslatorMic device first
+        // Use the default input device of the system
         let device = host
-            .input_devices()
-            .expect("Failed to list input devices")
-            .find(|d| {
-                let desc_str = format!("{:?}", d.description()); // convert DeviceDescription to String
-                desc_str.contains("translator_mic")
-            })
-            // Fallback to default input device if virtual mic not found
-            .or_else(|| host.default_input_device())
-            .expect("No input device available");
+            .default_input_device()
+            .expect("No default input device available");
 
-        println!("Using input device: {:?}", device.description());
+        // Get a human-readable description of the device
+        let device_desc = device
+            .description()
+            .map(|dn| dn.to_string())
+            .unwrap_or_else(|_| "<unknown>".to_string());
+        println!("Using input device: {}", device_desc);
 
-        let config = device.default_input_config().expect("No default config");
+        // Get the default input configuration (sample format, channels, sample rate)
+        let config = device
+            .default_input_config()
+            .expect("No default input config available");
+        println!("Input config: {:?}", config);
 
-        // Build input stream
+        // Wrap the channel in a mutex for thread-safe access inside the callback
+        let tx = Mutex::new(tx);
+
+        // Build the input stream
         let stream = device
             .build_input_stream(
                 &config.into(),
-                move |data: &[i16], _| {
-                    if let Err(e) = tx.blocking_send(data.to_vec()) {
+                move |data: &[f32], _: &cpal::InputCallbackInfo| {
+                    // Convert f32 samples in [-1.0, 1.0] to i16 PCM format
+                    let samples_i16: Vec<i16> =
+                        data.iter().map(|&s| (s * i16::MAX as f32) as i16).collect();
+
+                    // Send the audio samples to the Tokio channel
+                    if let Err(e) = tx.lock().unwrap().blocking_send(samples_i16) {
                         eprintln!("Failed to send audio samples: {:?}", e);
+                    } else {
+                        //println!("Audio frame sent: {} samples", data.len());
                     }
                 },
                 move |err| eprintln!("Microphone error: {:?}", err),
-                None,
+                None, // Option<Duration> for buffer size; None uses default
             )
             .expect("Failed to build input stream");
 
+        // Start the input stream
         stream.play().expect("Failed to start input stream");
+        println!("Microphone capture started successfully.");
 
-        println!("Microphone capture started");
-
+        // Keep the thread alive indefinitely
         loop {
-            std::thread::sleep(std::time::Duration::from_secs(1));
+            std::thread::sleep(Duration::from_secs(1));
         }
     });
 
