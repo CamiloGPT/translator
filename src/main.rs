@@ -202,23 +202,25 @@ fn spawn_mic_capture(tx: mpsc::Sender<Vec<i16>>) -> Result<()> {
     std::thread::spawn(move || {
         let host = cpal::default_host();
 
+        // List all input devices
+        println!("Available input devices:");
+        for d in host.input_devices().expect("Failed to list input devices") {
+            println!("- {}", format!("{:?}", d.description()));
+        }
+
         // Try to find the virtual TranslatorMic device first
         let device = host
             .input_devices()
             .expect("Failed to list input devices")
             .find(|d| {
-                let desc = d.description(); // DeviceDescription
-                let desc_str = format!("{:?}", desc); // Convert to String for .contains
+                let desc_str = format!("{:?}", d.description()); // convert DeviceDescription to String
                 desc_str.contains("translator_mic")
             })
             // Fallback to default input device if virtual mic not found
             .or_else(|| host.default_input_device())
             .expect("No input device available");
 
-        println!(
-            "Using input device: {}",
-            format!("{:?}", device.description()) // log as string
-        );
+        println!("Using input device: {:?}", device.description());
 
         let config = device.default_input_config().expect("No default config");
 
@@ -236,7 +238,6 @@ fn spawn_mic_capture(tx: mpsc::Sender<Vec<i16>>) -> Result<()> {
             )
             .expect("Failed to build input stream");
 
-        // Start streaming audio
         stream.play().expect("Failed to start input stream");
 
         println!("Microphone capture started");
