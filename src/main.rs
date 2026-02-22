@@ -16,6 +16,7 @@ use tokio_tungstenite::{
 
 #[tokio::main]
 async fn main() {
+    // Install default Rustls crypto provider for TLS support
     rustls::crypto::ring::default_provider()
         .install_default()
         .expect("Failed to install rustls crypto provider");
@@ -24,7 +25,7 @@ async fn main() {
 
     let app = Router::new().route("/start", post(start));
 
-    println!("Running on http://localhost:8080");
+    println!("Server running on http://localhost:8080");
 
     let listener = TcpListener::bind("0.0.0.0:8080").await.unwrap();
     axum::serve(listener, app).await.unwrap();
@@ -33,27 +34,32 @@ async fn main() {
 async fn start() -> &'static str {
     tokio::spawn(async {
         if let Err(e) = run().await {
-            eprintln!("Error: {:?}", e);
+            eprintln!("Error during translation runtime: {:?}", e);
         }
     });
 
+    println!("Translator started");
     "Translator started"
 }
 
 async fn run() -> Result<()> {
+    // Load OpenAI API key from environment variables
     let api_key = env::var("OPENAI_API_KEY")?;
+    println!("Loaded OpenAI API key");
 
     let url = "wss://api.openai.com/v1/realtime?model=gpt-4o-realtime-preview";
-
     let mut req = url.into_client_request()?;
 
+    // Add required headers for realtime API
     req.headers_mut()
         .insert("Authorization", format!("Bearer {}", api_key).parse()?);
-
     req.headers_mut()
         .insert("OpenAI-Beta", "realtime=v1".parse()?);
 
+    println!("Connecting to OpenAI Realtime WebSocket...");
     let (ws, _) = connect_async(req).await?;
+    println!("Connected to OpenAI Realtime WebSocket");
+
     let (mut write, mut read) = ws.split();
 
     // Configure session
@@ -73,12 +79,12 @@ async fn run() -> Result<()> {
             .into(),
         ))
         .await?;
-
     println!("Realtime session configured");
 
     let (tx, mut rx) = mpsc::channel::<Vec<i16>>(32);
 
     spawn_mic_capture(tx)?;
+    println!("Microphone capture started");
 
     // Audio output setup (rodio 0.22.1)
     let handle = DeviceSinkBuilder::open_default_sink()?;
@@ -128,6 +134,7 @@ async fn run() -> Result<()> {
                 });
 
                 let _ = write.send(Message::Text(msg.to_string().into())).await;
+                println!("Audio chunk sent (speaking)");
             } else if speaking {
                 silence_frames += 1;
 
@@ -175,6 +182,7 @@ async fn run() -> Result<()> {
                                 );
 
                                 player_clone.append(source);
+                                println!("Audio chunk played");
                             }
                         }
                     }
@@ -189,6 +197,7 @@ async fn run() -> Result<()> {
     Ok(())
 }
 
+// Spawn microphone capture thread
 fn spawn_mic_capture(tx: mpsc::Sender<Vec<i16>>) -> Result<()> {
     std::thread::spawn(move || {
         let host = cpal::default_host();
@@ -201,7 +210,7 @@ fn spawn_mic_capture(tx: mpsc::Sender<Vec<i16>>) -> Result<()> {
                 move |data: &[i16], _| {
                     let _ = tx.blocking_send(data.to_vec());
                 },
-                move |err| eprintln!("Mic error: {:?}", err),
+                move |err| eprintln!("Microphone error: {:?}", err),
                 None,
             )
             .unwrap();
