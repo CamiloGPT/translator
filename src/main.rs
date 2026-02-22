@@ -201,21 +201,45 @@ async fn run() -> Result<()> {
 fn spawn_mic_capture(tx: mpsc::Sender<Vec<i16>>) -> Result<()> {
     std::thread::spawn(move || {
         let host = cpal::default_host();
-        let device = host.default_input_device().expect("No input device");
+
+        // Try to find the virtual TranslatorMic device first
+        let device = host
+            .input_devices()
+            .expect("Failed to list input devices")
+            .find(|d| {
+                let desc = d.description(); // DeviceDescription
+                let desc_str = format!("{:?}", desc); // Convert to String for .contains
+                desc_str.contains("translator_mic")
+            })
+            // Fallback to default input device if virtual mic not found
+            .or_else(|| host.default_input_device())
+            .expect("No input device available");
+
+        println!(
+            "Using input device: {}",
+            format!("{:?}", device.description()) // log as string
+        );
+
         let config = device.default_input_config().expect("No default config");
 
+        // Build input stream
         let stream = device
             .build_input_stream(
                 &config.into(),
                 move |data: &[i16], _| {
-                    let _ = tx.blocking_send(data.to_vec());
+                    if let Err(e) = tx.blocking_send(data.to_vec()) {
+                        eprintln!("Failed to send audio samples: {:?}", e);
+                    }
                 },
                 move |err| eprintln!("Microphone error: {:?}", err),
                 None,
             )
-            .unwrap();
+            .expect("Failed to build input stream");
 
-        stream.play().unwrap();
+        // Start streaming audio
+        stream.play().expect("Failed to start input stream");
+
+        println!("Microphone capture started");
 
         loop {
             std::thread::sleep(std::time::Duration::from_secs(1));
