@@ -13,7 +13,10 @@ use tokio::{
     sync::mpsc,
     time::{interval, Duration},
 };
-use tokio_tungstenite::{connect_async, tungstenite::protocol::Message};
+use tokio_tungstenite::{
+    connect_async,
+    tungstenite::{client::IntoClientRequest, protocol::Message},
+};
 
 #[tokio::main]
 async fn main() {
@@ -44,11 +47,15 @@ async fn start() -> &'static str {
 async fn run() -> Result<()> {
     let api_key = env::var("OPENAI_API_KEY")?;
 
-    let req = http::Request::builder()
-        .uri("wss://api.openai.com/v1/realtime?model=gpt-4o-realtime-preview")
-        .header("Authorization", format!("Bearer {}", api_key))
-        .header("OpenAI-Beta", "realtime=v1")
-        .body(())?;
+    let url = "wss://api.openai.com/v1/realtime?model=gpt-4o-realtime-preview";
+
+    let mut req = url.into_client_request()?;
+
+    req.headers_mut()
+        .insert("Authorization", format!("Bearer {}", api_key).parse()?);
+
+    req.headers_mut()
+        .insert("OpenAI-Beta", "realtime=v1".parse()?);
 
     let (ws, _) = connect_async(req).await?;
     let (mut write, mut read) = ws.split();
